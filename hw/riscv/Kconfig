@@ -23,6 +23,8 @@ config SIFIVE_U
     select HART
     select SIFIVE
     select UNIMP
+    select SIFIVE_SPI
+    select SSI_SD
 
 config SPIKE
     bool
