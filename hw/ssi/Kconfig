@@ -16,3 +16,7 @@ config XILINX_SPIPS
 config STM32F2XX_SPI
     bool
     select SSI
+
+config SIFIVE_SPI
+    bool
+    select SSI
