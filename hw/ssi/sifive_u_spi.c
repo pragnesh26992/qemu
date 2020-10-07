@@ -32,7 +32,7 @@
 
 static void sifive_spi_transfer(sifiveSPI *s)
 {
-
+    
     s->regs[R_RXDATA] = ssi_transfer(s->ssi, s->regs[R_TXDATA]);
 
 }
@@ -46,7 +46,8 @@ spi_read(void *opaque, hwaddr addr, unsigned int size)
     addr >>= 2;
     switch (addr) {
     case R_RXDATA:
-//	s->regs[R_IP] |= SIFIVE_SPI_IP_RXWM; 
+//	s->regs[R_IP] |= SIFIVE_SPI_IP_RXWM;
+
         r = s->regs[R_RXDATA];
     	DB_PRINT("Data received: 0x%x\n", s->regs[R_RXDATA]);
         break;
@@ -61,7 +62,7 @@ spi_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     }
 
-    DB_PRINT("addr=" TARGET_FMT_plx " = %x\n", addr * 4, r);
+//    DB_PRINT("addr=" TARGET_FMT_plx " = %x\n", addr * 4, r);
     return r;
 }
 
@@ -72,7 +73,6 @@ spi_write(void *opaque, hwaddr addr,
     sifiveSPI *s = opaque;
     uint32_t value = val64;
 
-    DB_PRINT("addr=" TARGET_FMT_plx " = %x\n", addr, value);
     addr >>= 2;
     switch (addr) {
     case R_TXDATA:
@@ -93,6 +93,10 @@ static void sifive_spi_do_reset(sifiveSPI *s)
 {
     memset(s->regs, 0, sizeof s->regs);
 
+    s->rx_fifo_len = 0;
+    s->rx_fifo_head = 0;
+    s->tx_fifo_len = 0;
+    s->tx_fifo_head = 0;
     s->regs[R_TXMARK] = 1;
     s->regs[R_CSDEF] = 1;
     s->regs[R_IP] = (SIFIVE_SPI_IP_TXWM | SIFIVE_SPI_IP_RXWM);

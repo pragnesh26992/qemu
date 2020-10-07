@@ -60,6 +60,13 @@ typedef struct sifiveSPI {
     qemu_irq *cs_lines;
 
     SSIBus *ssi;
+    /* The FIFO head points to the next empty entry.  */
+    int tx_fifo_head;
+    int rx_fifo_head;
+    int tx_fifo_len;
+    int rx_fifo_len;
+    uint16_t tx_fifo[8];
+    uint16_t rx_fifo[8];
 
     uint32_t regs[R_MAX];
 } sifiveSPI;

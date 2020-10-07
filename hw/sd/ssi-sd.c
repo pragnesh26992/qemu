@@ -20,7 +20,7 @@
 #include "qemu/module.h"
 #include "qom/object.h"
 
-//#define DEBUG_SSI_SD 1
+#define DEBUG_SSI_SD 1
 
 #ifdef DEBUG_SSI_SD
 #define DPRINTF(fmt, ...) \
@@ -46,6 +46,7 @@ struct ssi_sd_state {
     uint32_t mode;
     int cmd;
     uint8_t cmdarg[4];
+    uint8_t response_start;
     uint8_t response[5];
     int32_t arglen;
     int32_t response_pos;
@@ -75,12 +76,14 @@ DECLARE_INSTANCE_CHECKER(ssi_sd_state, SSI_SD,
 #define SSI_SDR_ADDRESS_ERROR   0x2000
 #define SSI_SDR_PARAMETER_ERROR 0x4000
 
+int32_t read_byte_len = 0;
+
 static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
 {
     ssi_sd_state *s = SSI_SD(dev);
 
     /* Special case: allow CMD12 (STOP TRANSMISSION) while reading data.  */
-    if (s->mode == SSI_SD_DATA_READ && val == 0x4d) {
+    if (s->mode == SSI_SD_DATA_READ && val == 0x4c) {
         s->mode = SSI_SD_CMD;
         /* There must be at least one byte delay before the card responds.  */
         s->stopping = 1;
@@ -89,7 +92,7 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
     switch (s->mode) {
     case SSI_SD_CMD:
         if (val == 0xff) {
-            DPRINTF("NULL command\n");
+    //        DPRINTF("NULL command\n");
             return 0xff;
         }
         s->cmd = val & 0x3f;
@@ -112,6 +115,11 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
             } else if (s->cmd == 58) {
                 /* CMD58 returns R3 response (OCR)  */
                 DPRINTF("Returned OCR\n");
+                s->arglen = 5;
+                s->response[0] = 1;
+                memcpy(&s->response[1], longresp, 4);
+            } else if (s->cmd == 8) {
+                DPRINTF("Returned IF cond\n");
                 s->arglen = 5;
                 s->response[0] = 1;
                 memcpy(&s->response[1], longresp, 4);
@@ -167,6 +175,7 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
             }
             s->mode = SSI_SD_RESPONSE;
             s->response_pos = 0;
+            s->response_start = 1;
         } else {
             s->cmdarg[s->arglen++] = val;
         }
@@ -176,6 +185,10 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
             s->stopping = 0;
             return 0xff;
         }
+	if (s->response_start == 1) {
+	    s->response_start = 0;
+	    return 0xff;
+	}
         if (s->response_pos < s->arglen) {
             DPRINTF("Response 0x%02x\n", s->response[s->response_pos]);
             return s->response[s->response_pos++];
@@ -191,13 +204,22 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
     case SSI_SD_DATA_START:
         DPRINTF("Start read block\n");
         s->mode = SSI_SD_DATA_READ;
+	read_byte_len = 0;
         return 0xfe;
     case SSI_SD_DATA_READ:
+
+	if (read_byte_len >= 514) {
+		read_byte_len = 0;
+		return 0xfe;
+	}
+
         val = sdbus_read_byte(&s->sdbus);
         if (!sdbus_data_ready(&s->sdbus)) {
             DPRINTF("Data read end\n");
             s->mode = SSI_SD_CMD;
         }
+
+	read_byte_len++;
         return val;
     }
     /* Should never happen.  */
@@ -288,6 +310,7 @@ static void ssi_sd_reset(DeviceState *dev)
     s->arglen = 0;
     s->response_pos = 0;
     s->stopping = 0;
+    s->response_start = 0;
 }
 
 static void ssi_sd_class_init(ObjectClass *klass, void *data)
