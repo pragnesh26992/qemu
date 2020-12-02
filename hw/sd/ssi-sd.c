@@ -47,6 +47,7 @@ struct ssi_sd_state {
     int cmd;
     uint8_t cmdarg[4];
     uint8_t response[5];
+    uint8_t response_start;
     int32_t arglen;
     int32_t response_pos;
     int32_t stopping;
@@ -171,6 +172,7 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
             }
             s->mode = SSI_SD_RESPONSE;
             s->response_pos = 0;
+            s->response_start = 1;
         } else {
             s->cmdarg[s->arglen++] = val;
         }
@@ -178,6 +180,11 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
     case SSI_SD_RESPONSE:
         if (s->stopping) {
             s->stopping = 0;
+            return 0xff;
+        }
+        /* Return 0xff as a 1st byte response for any command */
+        if (s->response_start) {
+            s->response_start = 0;
             return 0xff;
         }
         if (s->response_pos < s->arglen) {
@@ -221,7 +228,8 @@ static int ssi_sd_post_load(void *opaque, int version_id)
     }
     if (s->mode == SSI_SD_RESPONSE &&
         (s->response_pos < 0 || s->response_pos >= ARRAY_SIZE(s->response) ||
-        (!s->stopping && s->arglen > ARRAY_SIZE(s->response)))) {
+        (!s->stopping && s->arglen > ARRAY_SIZE(s->response)) ||
+        (!s->response_start && s->arglen > ARRAY_SIZE(s->response)))) {
         return -EINVAL;
     }
 
@@ -238,6 +246,7 @@ static const VMStateDescription vmstate_ssi_sd = {
         VMSTATE_INT32(cmd, ssi_sd_state),
         VMSTATE_UINT8_ARRAY(cmdarg, ssi_sd_state, 4),
         VMSTATE_UINT8_ARRAY(response, ssi_sd_state, 5),
+        VMSTATE_UINT8(response_start, ssi_sd_state),
         VMSTATE_INT32(arglen, ssi_sd_state),
         VMSTATE_INT32(response_pos, ssi_sd_state),
         VMSTATE_INT32(stopping, ssi_sd_state),
@@ -292,6 +301,7 @@ static void ssi_sd_reset(DeviceState *dev)
     s->arglen = 0;
     s->response_pos = 0;
     s->stopping = 0;
+    s->response_start = 0;
 }
 
 static void ssi_sd_class_init(ObjectClass *klass, void *data)
