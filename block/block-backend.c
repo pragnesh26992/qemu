@@ -888,10 +888,11 @@ void blk_get_perm(BlockBackend *blk, uint64_t *perm, uint64_t *shared_perm)
  */
 int blk_attach_dev(BlockBackend *blk, DeviceState *dev)
 {
+#if 0
     if (blk->dev) {
         return -EBUSY;
     }
-
+#endif
     /* While migration is still incoming, we don't need to apply the
      * permissions of guest device BlockBackends. We might still have a block
      * job or NBD server writing to the image for storage migration. */

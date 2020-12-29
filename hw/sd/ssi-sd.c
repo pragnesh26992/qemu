@@ -74,6 +74,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(ssi_sd_state, SSI_SD)
 #define SSI_SDR_ADDRESS_ERROR   0x2000
 #define SSI_SDR_PARAMETER_ERROR 0x4000
 
+uint32_t read_byte_len = 0;
+
 static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
 {
     ssi_sd_state *s = SSI_SD(dev);
@@ -202,13 +204,23 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
     case SSI_SD_DATA_START:
         DPRINTF("Start read block\n");
         s->mode = SSI_SD_DATA_READ;
+	read_byte_len = 0;
         return 0xfe;
     case SSI_SD_DATA_READ:
+
+	/* 512 bytes data block + 2 bytes CRC */
+	if (read_byte_len >= 514) {
+		read_byte_len = 0;
+		return 0xfe;
+	}
+
         val = sdbus_read_byte(&s->sdbus);
         if (!sdbus_data_ready(&s->sdbus)) {
             DPRINTF("Data read end\n");
             s->mode = SSI_SD_CMD;
         }
+
+	read_byte_len++;
         return val;
     }
     /* Should never happen.  */
