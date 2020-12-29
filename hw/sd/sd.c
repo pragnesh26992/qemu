@@ -48,6 +48,7 @@
 #include "qemu/module.h"
 #include "sdmmc-internal.h"
 #include "trace.h"
+#include "qemu/crc16.h"
 
 //#define DEBUG_SD 1
 
@@ -1516,17 +1517,11 @@ static sd_rsp_type_t sd_normal_command(SDState *sd, SDRequest req)
         if (!sd->spi) {
             goto bad_cmd;
         }
-        goto unimplemented_spi_cmd;
+        return sd_r1;
 
     default:
     bad_cmd:
         qemu_log_mask(LOG_GUEST_ERROR, "SD: Unknown CMD%i\n", req.cmd);
-        return sd_illegal;
-
-    unimplemented_spi_cmd:
-        /* Commands that are recognised but not yet implemented in SPI mode.  */
-        qemu_log_mask(LOG_UNIMP, "SD: CMD%i not implemented in SPI mode\n",
-                      req.cmd);
         return sd_illegal;
     }
 
@@ -1986,11 +1981,15 @@ static const uint8_t sd_tuning_block_pattern[SD_TUNING_BLOCK_SIZE] = {
     0xbb, 0xff, 0xf7, 0xff,         0xf7, 0x7f, 0x7b, 0xde,
 };
 
+uint8_t crc_byte = 0;
+uint16_t crc16 = 0;
+
 uint8_t sd_read_byte(SDState *sd)
 {
     /* TODO: Append CRCs */
-    uint8_t ret;
+    uint8_t ret = 0;
     uint32_t io_len;
+    uint8_t crc_sent = 0;
 
     if (!sd->blk || !blk_is_inserted(sd->blk) || !sd->enable)
         return 0x00;
@@ -2011,34 +2010,113 @@ uint8_t sd_read_byte(SDState *sd)
                            sd->current_cmd, io_len);
     switch (sd->current_cmd) {
     case 6:	/* CMD6:   SWITCH_FUNCTION */
-        ret = sd->data[sd->data_offset ++];
+        if (sd->data_offset == 0)
+            crc16 = crc16_ccitt(0,sd->data, 64);
 
-        if (sd->data_offset >= 64)
+        if (sd->data_offset >= 64) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+	if (sd->data_offset < 64)
+		ret = sd->data[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     case 9:	/* CMD9:   SEND_CSD */
     case 10:	/* CMD10:  SEND_CID */
-        ret = sd->data[sd->data_offset ++];
+        if (sd->spi && sd->data_offset == 0)
+            crc16 = crc16_ccitt(0,sd->data, 16);
 
-        if (sd->data_offset >= 16)
-            sd->state = sd_transfer_state;
+        if (sd->spi && sd->data_offset >= 16) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+
+                if (crc_sent)
+                        sd->state = sd_transfer_state;
+        }
+
+	if (sd->data_offset < 16)
+		ret = sd->data[sd->data_offset ++];
+
+        if (!sd->spi && sd->data_offset >= 16)
+		sd->state = sd_transfer_state;
+
         break;
 
     case 13:	/* ACMD13: SD_STATUS */
-        ret = sd->sd_status[sd->data_offset ++];
+        if (sd->data_offset == 0)
+            crc16 = crc16_ccitt(0,sd->sd_status, sizeof(sd->sd_status));
 
-        if (sd->data_offset >= sizeof(sd->sd_status))
+        if (sd->data_offset >= sizeof(sd->sd_status)) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+        if (sd->data_offset < sizeof(sd->sd_status))
+            ret = sd->sd_status[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     case 17:	/* CMD17:  READ_SINGLE_BLOCK */
-        if (sd->data_offset == 0)
+        if (sd->data_offset == 0) {
             BLK_READ_BLOCK(sd->data_start, io_len);
-        ret = sd->data[sd->data_offset ++];
+            crc16 = crc16_ccitt(0,sd->data, io_len);
+        }
 
-        if (sd->data_offset >= io_len)
+        if (sd->data_offset >= io_len) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+        if (sd->data_offset < io_len)
+                ret = sd->data[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     case 18:	/* CMD18:  READ_MULTIPLE_BLOCK */
@@ -2048,10 +2126,27 @@ uint8_t sd_read_byte(SDState *sd)
                 return 0x00;
             }
             BLK_READ_BLOCK(sd->data_start, io_len);
+	    crc16 = crc16_ccitt(0,sd->data, io_len);
         }
-        ret = sd->data[sd->data_offset ++];
 
-        if (sd->data_offset >= io_len) {
+        if (!crc_sent && sd->data_offset >= io_len) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+        if (sd->data_offset < io_len)
+                ret = sd->data[sd->data_offset ++];
+
+        if (crc_sent && sd->data_offset >= io_len) {
             sd->data_start += io_len;
             sd->data_offset = 0;
 
@@ -2063,43 +2158,140 @@ uint8_t sd_read_byte(SDState *sd)
                 }
             }
         }
+
         break;
 
     case 19:    /* CMD19:  SEND_TUNING_BLOCK (SD) */
-        if (sd->data_offset >= SD_TUNING_BLOCK_SIZE - 1) {
-            sd->state = sd_transfer_state;
+	if (sd->data_offset == 0)
+		crc16 = crc16_ccitt(0,sd_tuning_block_pattern, SD_TUNING_BLOCK_SIZE);
+
+        if (sd->data_offset >= SD_TUNING_BLOCK_SIZE) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
         }
-        ret = sd_tuning_block_pattern[sd->data_offset++];
+
+        if (sd->data_offset < SD_TUNING_BLOCK_SIZE)
+            ret = sd_tuning_block_pattern[sd->data_offset++];
+
+        if (crc_sent)
+            sd->state = sd_transfer_state;
+
         break;
 
     case 22:	/* ACMD22: SEND_NUM_WR_BLOCKS */
-        ret = sd->data[sd->data_offset ++];
+        if (sd->data_offset == 0)
+            crc16 = crc16_ccitt(0,sd->data, 4);
 
-        if (sd->data_offset >= 4)
+        if (sd->data_offset >= 4) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+	if (sd->data_offset < 4)
+		ret = sd->data[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     case 30:	/* CMD30:  SEND_WRITE_PROT */
-        ret = sd->data[sd->data_offset ++];
+        if (sd->data_offset == 0)
+            crc16 = crc16_ccitt(0,sd->data, 4);
 
-        if (sd->data_offset >= 4)
+        if (sd->data_offset >= 4) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+	if (sd->data_offset < 4)
+		ret = sd->data[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     case 51:	/* ACMD51: SEND_SCR */
-        ret = sd->scr[sd->data_offset ++];
+        if (sd->data_offset == 0)
+            crc16 = crc16_ccitt(0,sd->scr, sizeof(sd->scr));
 
-        if (sd->data_offset >= sizeof(sd->scr))
+        if (sd->data_offset >= sizeof(sd->scr)) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+        if (sd->data_offset < sizeof(sd->scr))
+            ret = sd->scr[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     case 56:	/* CMD56:  GEN_CMD */
-        if (sd->data_offset == 0)
-            APP_READ_BLOCK(sd->data_start, sd->blk_len);
-        ret = sd->data[sd->data_offset ++];
 
-        if (sd->data_offset >= sd->blk_len)
+        if (sd->data_offset == 0) {
+            APP_READ_BLOCK(sd->data_start, sd->blk_len);
+            crc16 = crc16_ccitt(0,sd->data, sd->blk_len);
+        }
+
+        if (sd->data_offset >= sd->blk_len) {
+                crc_byte++;
+                switch(crc_byte) {
+                case 1:
+                        ret = (uint8_t)(crc16 >> 8);
+                        break;
+                case 2:
+                        ret = (uint8_t)crc16;
+                        crc_byte = 0;
+                        crc_sent = 1;
+                        break;
+                }
+        }
+
+        if (sd->data_offset < sd->blk_len)
+                ret = sd->data[sd->data_offset ++];
+
+        if (crc_sent)
             sd->state = sd_transfer_state;
+
         break;
 
     default:
